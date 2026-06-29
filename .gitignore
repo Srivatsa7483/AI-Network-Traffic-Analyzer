@@ -1,0 +1,39 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python Cache & Compilation
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Databases
+backend/*.db
+*.db
+*.db-journal
+
+# Packet Captures
+captures/
+backend/captures/
+*.pcap
+*.csv
+
+# Frontend Dependencies & Builds
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+node_modules/
+dist/
+
+# OS/Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.log
