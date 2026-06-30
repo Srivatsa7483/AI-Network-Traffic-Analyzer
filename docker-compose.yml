@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: network-analyzer-api
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+    ports:
+      - "5000:5000"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: network-analyzer-web
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

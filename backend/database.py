@@ -1,7 +1,8 @@
 import sqlite3
+import threading
 
 
-class DatabaseManager:
+class SQLiteManager:
 
     def __init__(self, db_name="network_analyzer.db"):
 
@@ -10,343 +11,749 @@ class DatabaseManager:
             check_same_thread=False
         )
 
-        self.cursor = self.connection.cursor()
+        self.lock = threading.Lock()
+
+        self.closed = False
 
         self.create_tables()
 
+    # ----------------------------------------------------
+
     def create_tables(self):
 
-        # Packets Table
-        self.cursor.execute("""
+        with self.lock:
 
-        CREATE TABLE IF NOT EXISTS packets(
+            cursor = self.connection.cursor()
 
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            try:
 
-            session_id INTEGER,
+                # Packets Table
+                cursor.execute("""
 
-            timestamp TEXT,
+                CREATE TABLE IF NOT EXISTS packets(
 
-            source_ip TEXT,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            destination_ip TEXT,
+                    session_id INTEGER,
 
-            protocol TEXT,
+                    timestamp TEXT,
 
-            source_port INTEGER,
+                    source_ip TEXT,
 
-            destination_port INTEGER,
+                    destination_ip TEXT,
 
-            packet_size INTEGER,
+                    protocol TEXT,
 
-            ip_version TEXT
+                    source_port INTEGER,
 
-        )
+                    destination_port INTEGER,
 
-        """)
+                    packet_size INTEGER,
 
-        # Auto-migration: check if session_id column exists
-        self.cursor.execute("PRAGMA table_info(packets)")
-        columns = [row[1] for row in self.cursor.fetchall()]
-        if columns and "session_id" not in columns:
-            self.cursor.execute("ALTER TABLE packets ADD COLUMN session_id INTEGER")
+                    ip_version TEXT
 
-        # Sessions Table
-        self.cursor.execute("""
+                )
 
-        CREATE TABLE IF NOT EXISTS sessions(
+                """)
 
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                # Auto-migration: check if session_id column exists
+                cursor.execute("PRAGMA table_info(packets)")
 
-            start_time TEXT,
+                columns = [row[1] for row in cursor.fetchall()]
 
-            end_time TEXT,
+                if columns and "session_id" not in columns:
 
-            total_packets INTEGER,
+                    cursor.execute("ALTER TABLE packets ADD COLUMN session_id INTEGER")
 
-            status TEXT
+                # Sessions Table
+                cursor.execute("""
 
-        )
+                CREATE TABLE IF NOT EXISTS sessions(
 
-        """)
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-        self.connection.commit()
+                    start_time TEXT,
 
-        # Alerts Table
-        self.cursor.execute("""
+                    end_time TEXT,
 
-        CREATE TABLE IF NOT EXISTS alerts(
+                    total_packets INTEGER,
 
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT
 
-            session_id INTEGER,
+                )
 
-            timestamp TEXT,
+                """)
 
-            severity TEXT,
+                # Alerts Table
+                cursor.execute("""
 
-            threat_type TEXT,
+                CREATE TABLE IF NOT EXISTS alerts(
 
-            source_ip TEXT,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-            description TEXT
+                    session_id INTEGER,
 
-        )
+                    timestamp TEXT,
 
-        """)
+                    severity TEXT,
 
-        self.connection.commit()
+                    threat_type TEXT,
+
+                    source_ip TEXT,
+
+                    description TEXT
+
+                )
+
+                """)
+
+                # Users Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT DEFAULT 'Analyst',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+
+                self.connection.commit()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def create_session(self, start_time):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        INSERT INTO sessions(
+            cursor = self.connection.cursor()
 
-            start_time,
+            try:
 
-            end_time,
+                # Auto-cleanup: Mark any old running sessions as aborted/completed and count packets
+                cursor.execute("""
+                UPDATE sessions
+                SET status = 'Completed', 
+                    end_time = 'Abrupt Shutdown',
+                    total_packets = (
+                        SELECT COUNT(*) 
+                        FROM packets 
+                        WHERE packets.session_id = sessions.id
+                    )
+                WHERE status = 'Running'
+                """)
 
-            total_packets,
+                cursor.execute("""
 
-            status
+                INSERT INTO sessions(
 
-        )
+                    start_time,
 
-        VALUES(?,?,?,?)
+                    end_time,
 
-        """,
+                    total_packets,
 
-        (
+                    status
 
-            start_time,
+                )
 
-            None,
+                VALUES(?,?,?,?)
 
-            0,
+                """,
 
-            "Running"
+                (
 
-        )
+                    start_time,
 
-        )
+                    None,
 
-        self.connection.commit()
+                    0,
 
-        return self.cursor.lastrowid
+                    "Running"
+
+                )
+
+                )
+
+                self.connection.commit()
+
+                return cursor.lastrowid
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def end_session(self, session_id, end_time, total_packets):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        UPDATE sessions
+            if self.closed:
 
-        SET
+                return
 
-            end_time=?,
+            cursor = self.connection.cursor()
 
-            total_packets=?,
+            try:
 
-            status=?
+                cursor.execute("""
 
-        WHERE id=?
+                UPDATE sessions
 
-        """,
+                SET
 
-        (
+                    end_time=?,
 
-            end_time,
+                    total_packets=?,
 
-            total_packets,
+                    status=?
 
-            "Completed",
+                WHERE id=?
 
-            session_id
+                """,
 
-        )
+                (
 
-        )
+                    end_time,
 
-        self.connection.commit()
+                    total_packets,
+
+                    "Completed",
+
+                    session_id
+
+                )
+
+                )
+
+                self.connection.commit()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def insert_packet(self, session_id, packet):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        INSERT INTO packets(
+            if self.closed:
 
-            session_id,
+                return
 
-            timestamp,
+            cursor = self.connection.cursor()
 
-            source_ip,
+            try:
 
-            destination_ip,
+                cursor.execute("""
 
-            protocol,
+                INSERT INTO packets(
 
-            source_port,
+                    session_id,
 
-            destination_port,
+                    timestamp,
 
-            packet_size,
+                    source_ip,
 
-            ip_version
+                    destination_ip,
 
-        )
+                    protocol,
 
-        VALUES(?,?,?,?,?,?,?,?,?)
+                    source_port,
 
-        """,
+                    destination_port,
 
-        (
+                    packet_size,
 
-            session_id,
+                    ip_version,
 
-            packet["timestamp"],
+                    flags,
 
-            packet["source_ip"],
+                    info
 
-            packet["destination_ip"],
+                )
 
-            packet["protocol"],
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
 
-            packet.get("source_port"),
+                """,
 
-            packet.get("destination_port"),
+                (
 
-            packet["packet_size"],
+                    session_id,
 
-            packet["ip_version"]
+                    packet["timestamp"],
 
-        )
+                    packet["source_ip"],
 
-        )
+                    packet["destination_ip"],
 
-        self.connection.commit()
+                    packet["protocol"],
+
+                    packet.get("source_port"),
+
+                    packet.get("destination_port"),
+
+                    packet["packet_size"],
+
+                    packet["ip_version"],
+
+                    packet.get("flags"),
+
+                    packet.get("info")
+
+                )
+
+                )
+
+                self.connection.commit()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def get_recent_packets(self, limit=100):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        SELECT *
+            cursor = self.connection.cursor()
 
-        FROM packets
+            try:
 
-        ORDER BY id DESC
+                cursor.execute("""
 
-        LIMIT ?
+                SELECT *
 
-        """, (limit,))
+                FROM packets
 
-        return self.cursor.fetchall()
+                ORDER BY id DESC
+
+                LIMIT ?
+
+                """, (limit,))
+
+                return cursor.fetchall()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def get_sessions(self):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        SELECT *
+            cursor = self.connection.cursor()
 
-        FROM sessions
+            try:
 
-        ORDER BY id DESC
+                cursor.execute("""
 
-        """)
+                SELECT *
 
-        return self.cursor.fetchall()
+                FROM sessions
+
+                ORDER BY id DESC
+
+                """)
+
+                return cursor.fetchall()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def close(self):
 
-        self.connection.close()
+        with self.lock:
+
+            self.connection.close()
+
+            self.closed = True
+
+    # ----------------------------------------------------
+
+    def migrate_database(self):
+
+        with self.lock:
+
+            if self.closed:
+
+                return
+
+            cursor = self.connection.cursor()
+
+            try:
+
+                cursor.execute("PRAGMA table_info(packets)")
+
+                columns = [row[1] for row in cursor.fetchall()]
+
+                if "flags" not in columns:
+
+                    cursor.execute("ALTER TABLE packets ADD COLUMN flags TEXT")
+
+                if "info" not in columns:
+
+                    cursor.execute("ALTER TABLE packets ADD COLUMN info TEXT")
+
+                self.connection.commit()
+
+            except Exception as e:
+
+                print(f"[Database Error] Migration failed: {e}")
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
+
+    def delete_session(self, session_id):
+
+        with self.lock:
+
+            if self.closed:
+
+                return False
+
+            cursor = self.connection.cursor()
+
+            try:
+
+                # Delete alerts associated with session
+                cursor.execute("DELETE FROM alerts WHERE session_id = ?", (session_id,))
+
+                # Delete packets associated with session
+                cursor.execute("DELETE FROM packets WHERE session_id = ?", (session_id,))
+
+                # Delete session itself
+                cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+                self.connection.commit()
+
+                return True
+
+            except Exception as e:
+
+                print(f"[Database Error] Deleting session #{session_id} failed: {e}")
+
+                return False
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
 
     def get_packets_by_session(self, session_id):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        SELECT *
+            cursor = self.connection.cursor()
 
-        FROM packets
+            try:
 
-        WHERE session_id=?
+                cursor.execute("""
 
-        ORDER BY id
+                SELECT *
 
-        """,
+                FROM packets
 
-        (session_id,))
+                WHERE session_id=?
 
-        return self.cursor.fetchall()
+                ORDER BY id
+
+                """,
+
+                (session_id,))
+
+                return cursor.fetchall()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def insert_alert(self, session_id, alert):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        INSERT INTO alerts(
+            if self.closed:
 
-            session_id,
+                return
 
-            timestamp,
+            cursor = self.connection.cursor()
 
-            severity,
+            try:
 
-            threat_type,
+                cursor.execute("""
 
-            source_ip,
+                INSERT INTO alerts(
 
-            description
+                    session_id,
 
-        )
+                    timestamp,
 
-        VALUES(?,?,?,?,?,?)
+                    severity,
 
-        """,
+                    threat_type,
 
-        (
+                    source_ip,
 
-            session_id,
+                    description
 
-            alert["timestamp"],
+                )
 
-            alert["severity"],
+                VALUES(?,?,?,?,?,?)
 
-            alert["type"],
+                """,
 
-            alert["source_ip"],
+                (
 
-            alert["description"]
+                    session_id,
 
-        )
+                    alert["timestamp"],
 
-        )
+                    alert["severity"],
 
-        self.connection.commit()
+                    alert["type"],
+
+                    alert["source_ip"],
+
+                    alert["description"]
+
+                )
+
+                )
+
+                self.connection.commit()
+
+            finally:
+
+                cursor.close()
 
     # ----------------------------------------------------
 
     def get_alerts(self):
 
-        self.cursor.execute("""
+        with self.lock:
 
-        SELECT *
+            cursor = self.connection.cursor()
 
-        FROM alerts
+            try:
 
-        ORDER BY id DESC
+                cursor.execute("""
 
-        """)
+                SELECT *
 
-        return self.cursor.fetchall()
+                FROM alerts
+
+                ORDER BY id DESC
+
+                """)
+
+                return cursor.fetchall()
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
+
+    def get_alert_summary(self):
+
+        with self.lock:
+
+            cursor = self.connection.cursor()
+
+            try:
+
+                cursor.execute("""
+
+                SELECT
+
+                    threat_type,
+
+                    COUNT(*)
+
+                FROM alerts
+
+                GROUP BY threat_type
+
+                ORDER BY COUNT(*) DESC
+
+                """)
+
+                rows = cursor.fetchall()
+
+                summary = {}
+
+                for row in rows:
+
+                    summary[row[0]] = row[1]
+
+                return summary
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
+
+    def get_session_alerts(self, session_id):
+
+        with self.lock:
+
+            cursor = self.connection.cursor()
+
+            try:
+
+                cursor.execute("""
+
+                SELECT *
+
+                FROM alerts
+
+                WHERE session_id=?
+
+                ORDER BY id DESC
+
+                """,
+
+                (session_id,))
+
+                return cursor.fetchall()
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
+
+    def total_alerts(self):
+
+        with self.lock:
+
+            cursor = self.connection.cursor()
+
+            try:
+
+                cursor.execute("""
+
+                SELECT COUNT(*)
+
+                FROM alerts
+
+                """)
+
+                return cursor.fetchone()[0]
+
+            finally:
+
+                cursor.close()
+
+    # ----------------------------------------------------
+
+    def health_check(self):
+        try:
+            with self.lock:
+                cursor = self.connection.cursor()
+                try:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                finally:
+                    cursor.close()
+            return {"status": "healthy", "type": "sqlite"}
+        except Exception as e:
+            return {"status": "unhealthy", "type": "sqlite", "error": str(e)}
+
+    # ----------------------------------------------------
+    # User Operations for Authentication
+    # ----------------------------------------------------
+
+    def create_user(self, username, email, password_hash, role='Analyst'):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                INSERT INTO users (username, email, password_hash, role)
+                VALUES (?, ?, ?, ?)
+                """, (username, email, password_hash, role))
+                self.connection.commit()
+                return cursor.lastrowid
+            except sqlite3.IntegrityError:
+                raise ValueError("Username or email already exists")
+            finally:
+                cursor.close()
+
+    def get_user_by_username(self, username):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                SELECT id, username, email, password_hash, role, created_at
+                FROM users
+                WHERE username = ?
+                """, (username,))
+                return cursor.fetchone()
+            finally:
+                cursor.close()
+
+    def get_user_by_id(self, user_id):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                SELECT id, username, email, password_hash, role, created_at
+                FROM users
+                WHERE id = ?
+                """, (user_id,))
+                return cursor.fetchone()
+            finally:
+                cursor.close()
+
+    def update_user_profile(self, user_id, username, email):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                UPDATE users
+                SET username = ?, email = ?
+                WHERE id = ?
+                """, (username, email, user_id))
+                self.connection.commit()
+                return True
+            except sqlite3.IntegrityError:
+                raise ValueError("Username or email already exists")
+            finally:
+                cursor.close()
+
+
+class DatabaseManager:
+    """
+    Transparent factory wrapper that selects SQLiteManager or PostgreSQLManager
+    based on configuration. Routes all method calls automatically.
+    """
+    def __init__(self):
+        import config
+        if config.DB_TYPE == "postgres":
+            from postgres_manager import PostgreSQLManager
+            self._db = PostgreSQLManager(config.DATABASE_URL)
+        else:
+            self._db = SQLiteManager()
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)

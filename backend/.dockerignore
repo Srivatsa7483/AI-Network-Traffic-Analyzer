@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+network_analyzer.db
+*.pcap
+*.csv
+.git/
+.gitignore
+.agents/
+.gemini/

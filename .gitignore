@@ -37,3 +37,6 @@ Thumbs.db
 *.sln
 *.swp
 *.log
+
+# Secrets and Environment Config
+.env

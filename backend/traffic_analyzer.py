@@ -14,12 +14,16 @@ from exports import ExportManager
 from database import DatabaseManager
 from collections import deque
 from threat_detector import ThreatDetector
-
-
+from ml.anomaly_detector import AnomalyDetector
+from collections import Counter
 
 class TrafficAnalyzer:
 
     def __init__(self):
+
+        self.running = True
+
+        self.paused = False
 
         self.start_time = time.time()
 
@@ -28,13 +32,34 @@ class TrafficAnalyzer:
         self.session_id = self.db.create_session(
             time.strftime("%Y-%m-%d %H:%M:%S")
         )
+        # In-memory alert counter for current session — avoids hitting DB per poll
+        # Must be initialized BEFORE ThreatDetector so the callback can reference it
+        self._total_alerts_count = 0
+
         self.detector = ThreatDetector(
+            self.db,
+            self.session_id,
+            on_alert=self._on_new_alert
+        )
 
-    self.db,
+        # AI Module
+        try:
+            self.ai_detector = AnomalyDetector()
+            self.ai_enabled = True
+        except Exception as e:
+            print(f"AI Module Disabled: {e}")
+            self.ai_detector = None
+            self.ai_enabled = False
 
-    self.session_id
+        # Packets collected for AI analysis
+        self.ml_packets = []
 
-)
+        # AI detection history
+        self.ai_history = []
+
+        # Analyze every 5 seconds
+        self.ml_window_start = time.time()
+        self.ml_window_duration = 5
 
         # Get absolute path to the project root captures folder
         backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +73,16 @@ class TrafficAnalyzer:
 
         self.exporter = ExportManager()
 
-        self.raw_packets = deque(maxlen=5000)
+        self.raw_packets = {}
+
+        self.next_packet_id = 1
+
+        # Packet batch buffer — flush to DB every 2s or every 50 packets
+        self._packet_buffer = []
+        self._last_flush_time = time.time()
+        self._flush_interval = 2.0   # seconds
+        self._flush_batch_size = 50  # packets
+
 
         self.statistics = {
             "total_packets": 0,
@@ -84,39 +118,38 @@ class TrafficAnalyzer:
     # Update statistics
     # -------------------------------------------------
 
-    def update_statistics(self, packet_info):
+    def update_statistics(self, packet_info, raw_packet):
 
         if packet_info is None:
             return
 
+        # Increment total packets
         self.statistics["total_packets"] += 1
+
+        # Increment total bytes
         self.statistics["total_bytes"] += packet_info["packet_size"]
 
-        # Protocol
-        protocol = packet_info.get("protocol", "OTHER")
-
-        if protocol in self.statistics["protocols"]:
-            self.statistics["protocols"][protocol] += 1
+        # Increment protocol count
+        proto = packet_info["protocol"]
+        if proto in self.statistics["protocols"]:
+            self.statistics["protocols"][proto] += 1
         else:
             self.statistics["protocols"]["OTHER"] += 1
 
         # IP Version
-        ip_version = packet_info.get("ip_version")
-
-        if ip_version in self.statistics["ip_versions"]:
-            self.statistics["ip_versions"][ip_version] += 1
+        version = packet_info["ip_version"]
+        if version in self.statistics["ip_versions"]:
+            self.statistics["ip_versions"][version] += 1
 
         # Source IP
-        src_ip = packet_info.get("source_ip")
-
+        src_ip = packet_info["source_ip"]
         if src_ip:
             self.statistics["source_ips"][src_ip] = (
                 self.statistics["source_ips"].get(src_ip, 0) + 1
             )
 
         # Destination IP
-        dst_ip = packet_info.get("destination_ip")
-
+        dst_ip = packet_info["destination_ip"]
         if dst_ip:
             self.statistics["destination_ips"][dst_ip] = (
                 self.statistics["destination_ips"].get(dst_ip, 0) + 1
@@ -124,7 +157,6 @@ class TrafficAnalyzer:
 
         # Source Port
         src_port = packet_info.get("source_port")
-
         if src_port is not None:
             self.statistics["source_ports"][src_port] = (
                 self.statistics["source_ports"].get(src_port, 0) + 1
@@ -132,38 +164,124 @@ class TrafficAnalyzer:
 
         # Destination Port
         dst_port = packet_info.get("destination_port")
-
         if dst_port is not None:
             self.statistics["destination_ports"][dst_port] = (
                 self.statistics["destination_ports"].get(dst_port, 0) + 1
             )
 
+        # Generate the unique ID for this packet
+        packet_id = self.next_packet_id
+        self.next_packet_id += 1
+
+        # Cache raw packet mapped by ID
+        self.raw_packets[packet_id] = raw_packet
+
+        # Prune older packets to limit memory
+        if len(self.raw_packets) > 1000:
+            oldest_id = next(iter(self.raw_packets))
+            self.raw_packets.pop(oldest_id)
+
         packet = {
-
-        "timestamp": time.strftime("%H:%M:%S"),
-
-        "source_ip": packet_info["source_ip"],
-
-        "destination_ip": packet_info["destination_ip"],
-
-        "protocol": packet_info["protocol"],
-
-        "source_port": packet_info.get("source_port"),
-
-        "destination_port": packet_info.get("destination_port"),
-
-        "packet_size": packet_info["packet_size"],
-
-        "ip_version": packet_info["ip_version"]
-
-    }
+            "id": packet_id,
+            "timestamp": time.strftime("%H:%M:%S"),
+            "source_ip": packet_info["source_ip"],
+            "destination_ip": packet_info["destination_ip"],
+            "protocol": packet_info["protocol"],
+            "source_port": packet_info.get("source_port"),
+            "destination_port": packet_info.get("destination_port"),
+            "packet_size": packet_info["packet_size"],
+            "ip_version": packet_info["ip_version"],
+            "flags": packet_info.get("flags"),
+            "info": packet_info.get("info")
+        }
 
         self.recent_packets.appendleft(packet)
-        self.db.insert_packet(
-    self.session_id,
-    packet
-)
+
+        # Buffer packet for batch DB insert
+        self._packet_buffer.append(packet)
+
+        # Flush if batch size reached OR flush interval elapsed
+        now = time.time()
+        if len(self._packet_buffer) >= self._flush_batch_size or \
+                (now - self._last_flush_time) >= self._flush_interval:
+            self._flush_packet_buffer()
+
         self.detector.analyze_packet(packet_info)
+
+        # -------------------------------------------------
+        # AI Detection (Every 5 Seconds)
+        # -------------------------------------------------
+
+        if self.ai_enabled:
+
+            self.ml_packets.append(packet_info)
+
+            current_time = time.time()
+
+            if current_time - self.ml_window_start >= self.ml_window_duration:
+
+                result = self.ai_detector.predict(
+                    self.ml_packets
+                )
+
+                if result and result["prediction"] == "ANOMALY":
+
+                    top_source = Counter(
+                        p["source_ip"] for p in self.ml_packets
+                    ).most_common(1)
+
+                    source_ip = (
+                        top_source[0][0]
+                        if top_source
+                        else "Unknown"
+                    )
+
+                    alert = {
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "severity": "MEDIUM",
+                        "type": "AI_ANOMALY",
+                        "source_ip": source_ip,
+                        "description": f"Isolation Forest detected unusual traffic (score={result['score']:.4f})"
+                    }
+
+                    # Save in memory
+                    self.detector.alerts.append(alert)
+
+                    # Save in database
+                    self.db.insert_alert(
+                        self.session_id,
+                        alert
+                    )
+
+                    # Increment in-memory alert counter
+                    self._total_alerts_count += 1
+
+                    # Save AI history
+                    self.ai_history.append({
+                        "timestamp": alert["timestamp"],
+                        "score": result["score"]
+                    })
+
+                    try:
+                        print("\n")
+                        print("=" * 70)
+                        print("🤖 AI ANOMALY DETECTED")
+                        print("=" * 70)
+                        print(f"Score       : {result['score']:.4f}")
+                        print(f"Description : {alert['description']}")
+                        print("=" * 70)
+                    except UnicodeEncodeError:
+                        print("\n")
+                        print("=" * 70)
+                        print("[AI ANOMALY] DETECTED")
+                        print("=" * 70)
+                        print(f"Score       : {result['score']:.4f}")
+                        print(f"Description : {alert['description']}")
+                        print("=" * 70)
+
+                # Reset the window
+                self.ml_packets.clear()
+                self.ml_window_start = current_time
 
     # -------------------------------------------------
     # Average Packet Size
@@ -419,7 +537,32 @@ class TrafficAnalyzer:
 
         return list(self.recent_packets)
 
+    def _on_new_alert(self, alert):
+        """Called by ThreatDetector whenever a new (non-duplicate) alert fires."""
+        self._total_alerts_count += 1
+
+    def _flush_packet_buffer(self):
+        """Flush buffered packets to the database in one bulk INSERT.
+        On failure, packets are kept in the buffer and retried on next flush.
+        """
+        if not self._packet_buffer:
+            return
+        to_flush = self._packet_buffer[:]
+        self._packet_buffer.clear()
+        self._last_flush_time = time.time()
+        try:
+            self.db.insert_packets_bulk(self.session_id, to_flush)
+        except Exception as e:
+            print(f"[Buffer Flush Error] {e} — {len(to_flush)} packets will be retried")
+            # Put packets back so they aren't lost
+            self._packet_buffer = to_flush + self._packet_buffer
+
     def close_session(self):
+
+        self.running = False
+
+        # Flush any remaining buffered packets before closing
+        self._flush_packet_buffer()
 
         self.db.end_session(
 
@@ -427,9 +570,9 @@ class TrafficAnalyzer:
 
             time.strftime("%Y-%m-%d %H:%M:%S"),
 
-        self.statistics["total_packets"]
+            self.statistics["total_packets"]
 
-    )
+        )
 
         self.db.close()
 
@@ -448,15 +591,41 @@ class TrafficAnalyzer:
 
     def export_current_pcap(self):
 
-        filename = os.path.join(self.captures_dir, f"session_{self.session_id}.pcap")
-
-        return self.exporter.export_pcap(
-
-            list(self.raw_packets),
-
-            filename
-
-        )
+        # The raw PCAP is already written in real-time by the Scapy PcapWriter.
+        # We just return this file path directly to prevent overwriting/corrupting it.
+        return self.capture_file
 
 
-    
+# -------------------------------------------------
+# AI Statistics
+# -------------------------------------------------
+
+    def get_ai_statistics(self):
+
+        return {
+            "model": "Isolation Forest",
+            "status": "Loaded",
+            "window_duration": self.ml_window_duration,
+            "detections": len(self.ai_history)
+        }
+
+    def get_security_statistics(self):
+        # Use DB total for historical alerts (covers all past sessions)
+        # and add current session's in-memory count on top
+        db_total = 0
+        try:
+            db_total = self.db.total_alerts()
+        except Exception:
+            pass
+        return {
+            "total_alerts": db_total,
+            "current_session": len(self.detector.get_alerts())
+        }
+
+    # -------------------------------------------------
+    # AI History
+    # -------------------------------------------------
+
+    def get_ai_history(self):
+
+        return self.ai_history

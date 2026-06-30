@@ -1,7 +1,7 @@
 """
 threat_detector.py
 
-Detects suspicious network activities.
+Central Threat Detection Engine
 
 Author: Srivatsa
 Project: AI Network Traffic Analyzer
@@ -9,189 +9,147 @@ Project: AI Network Traffic Analyzer
 
 import time
 
+from detectors.port_scan_detector import PortScanDetector
+from detectors.syn_flood_detector import SynFloodDetector
+from detectors.dns_detector import DNSDetector
+from detectors.icmp_detector import ICMPDetector
+from detectors.udp_detector import UDPDetector
+from detectors.packet_rate_detector import PacketRateDetector
+
 
 class ThreatDetector:
 
-    def __init__(self, db, session_id):
+    # Severity Mapping
+    SEVERITY = {
+        "PORT_SCAN": "HIGH",
+        "SYN_FLOOD": "CRITICAL",
+        "DNS_FLOOD": "HIGH",
+        "ICMP_FLOOD": "MEDIUM",
+        "HIGH_UDP_TRAFFIC": "MEDIUM",
+        "HIGH_PACKET_RATE": "CRITICAL"
+    }
+
+    # ----------------------------------------------------
+
+    def __init__(self, db, session_id, on_alert=None):
 
         self.db = db
-
         self.session_id = session_id
-
-        self.port_activity = {}
+        self.on_alert = on_alert  # optional callback: called after each alert is saved
 
         self.alerts = []
 
-        self.PORT_THRESHOLD = 10
+        # Prevent duplicate alerts
+        self.last_alert = {}
 
-        self.TIME_WINDOW = 10
+        # Register all detectors
+        self.detectors = [
 
-        self.syn_activity = {}
+            PortScanDetector(),
 
-        self.SYN_THRESHOLD = 50
-    # -------------------------------------------------
+            SynFloodDetector(),
 
-    def analyze_packet(self, packet_info):
+            DNSDetector(),
 
-        # Ignore packets without ports
-        if packet_info.get("destination_port") is None:
-            return
+            ICMPDetector(),
 
-        source_ip = packet_info["source_ip"]
-        destination_port = packet_info["destination_port"]
+            UDPDetector(),
 
-        current_time = time.time()
+            PacketRateDetector()
 
-        # First packet from this source
-        if source_ip not in self.port_activity:
+        ]
 
-            self.port_activity[source_ip] = {
+    # ----------------------------------------------------
 
-                "ports": set(),
+    def analyze_packet(self, packet):
 
-                "start_time": current_time
+        """
+        Send every packet to every detector.
+        """
 
-            }
+        for detector in self.detectors:
 
-        activity = self.port_activity[source_ip]
+            alert = detector.detect(packet)
 
-        # Window expired → reset
-        if current_time - activity["start_time"] > self.TIME_WINDOW:
+            if alert:
 
-            activity["ports"].clear()
+                # Add timestamp
+                alert["timestamp"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
 
-            activity["start_time"] = current_time
+                # Ensure severity exists
+                alert["severity"] = self.SEVERITY.get(
+                    alert["type"],
+                    "LOW"
+                )
 
-        # Add port
-        activity["ports"].add(destination_port)
+                key = (
+                    alert["type"],
+                    alert["source_ip"]
+                )
 
-        # Detect Port Scan
-        if len(activity["ports"]) >= self.PORT_THRESHOLD:
+                # Skip duplicate alerts
+                if key in self.last_alert:
+                    continue
 
-            alert = {
+                self.last_alert[key] = alert["timestamp"]
 
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-
-                "severity": "HIGH",
-
-                "type": "PORT SCAN",
-
-                "source_ip": source_ip,
-
-                "description":
-                    f"Accessed {len(activity['ports'])} unique ports "
-                    f"in {self.TIME_WINDOW} seconds."
-
-            }
-            self.detect_syn_flood(packet_info)
-            # Prevent duplicate alerts
-            if alert not in self.alerts:
-
+                # Store in memory
                 self.alerts.append(alert)
 
+                # Store in database
                 self.db.insert_alert(
+                    self.session_id,
+                    alert
+                )
 
-    self.session_id,
+                # Notify caller (e.g. increment in-memory counter)
+                if self.on_alert:
+                    self.on_alert(alert)
 
-    alert
+                # Print on terminal
+                self.print_alert(alert)
 
-)
+    # ----------------------------------------------------
 
-                print("\n")
-                print("=" * 70)
-                print("⚠ PORT SCAN DETECTED")
-                print("=" * 70)
-                print(f"Source IP : {source_ip}")
-                print(f"Ports     : {sorted(activity['ports'])}")
-                print("=" * 70)
+    def print_alert(self, alert):
 
-            # Reset after detection
-            activity["ports"].clear()
+        try:
 
-            activity["start_time"] = current_time
+            print("\n")
+            print("=" * 70)
+            print("🚨 THREAT DETECTED")
+            print("=" * 70)
+            print(f"Time        : {alert['timestamp']}")
+            print(f"Type        : {alert['type']}")
+            print(f"Severity    : {alert['severity']}")
+            print(f"Source IP   : {alert['source_ip']}")
+            print(f"Description : {alert['description']}")
+            print("=" * 70)
 
-    # -------------------------------------------------
+        except UnicodeEncodeError:
+
+            print("\n")
+            print("=" * 70)
+            print("[ALERT] THREAT DETECTED")
+            print("=" * 70)
+            print(f"Time        : {alert['timestamp']}")
+            print(f"Type        : {alert['type']}")
+            print(f"Severity    : {alert['severity']}")
+            print(f"Source IP   : {alert['source_ip']}")
+            print(f"Description : {alert['description']}")
+            print("=" * 70)
+
+    # ----------------------------------------------------
 
     def get_alerts(self):
 
         return self.alerts
 
-    # -------------------------------------------------
+    # ----------------------------------------------------
 
     def clear_alerts(self):
 
         self.alerts.clear()
-
-    def detect_syn_flood(self, packet_info):
-
-        if packet_info["protocol"] != "TCP":
-            return
-
-        flags = packet_info.get("flags")
-
-        if flags != "S":
-            return
-
-        source_ip = packet_info["source_ip"]
-
-        current_time = time.time()
-
-        if source_ip not in self.syn_activity:
-
-            self.syn_activity[source_ip] = {
-
-            "count": 0,
-
-            "start_time": current_time
-
-        }
-
-        activity = self.syn_activity[source_ip]
-
-        if current_time - activity["start_time"] > self.TIME_WINDOW:
-
-            activity["count"] = 0
-
-            activity["start_time"] = current_time
-
-            activity["count"] += 1
-
-        if activity["count"] >= self.SYN_THRESHOLD:
-
-            alert = {
-
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-
-            "severity": "HIGH",
-
-            "type": "SYN FLOOD",
-
-            "source_ip": source_ip,
-
-            "description":
-                f"{activity['count']} SYN packets in "
-                f"{self.TIME_WINDOW} seconds."
-
-        }
-
-        self.alerts.append(alert)
-
-        self.db.insert_alert(
-
-            self.session_id,
-
-            alert
-
-        )
-
-        print("\n")
-        print("=" * 70)
-        print("⚠ SYN FLOOD DETECTED")
-        print("=" * 70)
-        print(f"Source IP : {source_ip}")
-        print(f"SYN Count : {activity['count']}")
-        print("=" * 70)
-
-        activity["count"] = 0
-
-        activity["start_time"] = current_time
+        self.last_alert.clear()

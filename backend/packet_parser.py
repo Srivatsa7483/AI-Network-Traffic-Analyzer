@@ -12,6 +12,79 @@ from scapy.layers.inet import IP, TCP, UDP, ICMP
 from scapy.layers.inet6 import IPv6
 
 
+def generate_info(packet):
+    """
+    Generate a human-readable Wireshark-style summary for the packet.
+    """
+    from scapy.layers.inet import TCP, UDP, ICMP
+    from scapy.packet import Raw
+
+    try:
+        if packet.haslayer(TCP):
+            tcp = packet[TCP]
+            flags = str(tcp.flags)
+            flag_list = []
+            if "S" in flags: flag_list.append("SYN")
+            if "A" in flags: flag_list.append("ACK")
+            if "F" in flags: flag_list.append("FIN")
+            if "R" in flags: flag_list.append("RST")
+            if "P" in flags: flag_list.append("PSH")
+            
+            flag_str = "+".join(flag_list) if flag_list else flags
+            
+            # Simple HTTP / TLS Checks in payload
+            if packet.haslayer(Raw):
+                payload = bytes(packet[Raw].load)
+                for method in [b"GET", b"POST", b"PUT", b"DELETE", b"HTTP"]:
+                    if payload.startswith(method):
+                        try:
+                            line = payload.split(b"\r\n")[0].decode("utf-8", errors="ignore")
+                            return f"HTTP {line}"
+                        except Exception:
+                            pass
+                # TLS Client Hello check
+                if len(payload) > 5 and payload[:2] == b"\x16\x03" and payload[5] == 0x01:
+                    return "TLS Client Hello"
+
+            return f"TCP: {tcp.sport} -> {tcp.dport} [{flag_str}] Seq={tcp.seq} Ack={tcp.ack}"
+
+        elif packet.haslayer(UDP):
+            udp = packet[UDP]
+            try:
+                from scapy.layers.dns import DNS
+                if packet.haslayer(DNS):
+                    dns = packet[DNS]
+                    if dns.qr == 0:
+                        qname = dns.qd.qname.decode("utf-8", errors="ignore") if dns.qd else "Unknown"
+                        return f"DNS Query: {qname}"
+                    else:
+                        return "DNS Response"
+            except Exception:
+                pass
+
+            if udp.sport == 123 or udp.dport == 123:
+                return "NTP Time Sync"
+            if udp.sport in [67, 68] or udp.dport in [67, 68]:
+                return "DHCP Configuration"
+
+            return f"UDP: {udp.sport} -> {udp.dport} Len={udp.len}"
+
+        elif packet.haslayer(ICMP):
+            icmp = packet[ICMP]
+            if icmp.type == 8:
+                return "ICMP Echo (ping) Request"
+            elif icmp.type == 0:
+                return "ICMP Echo (ping) Reply"
+            elif icmp.type == 3:
+                return "ICMP Destination Unreachable"
+            return f"ICMP Type={icmp.type} Code={icmp.code}"
+
+    except Exception:
+        pass
+
+    return "IP Traffic"
+
+
 def parse_packet(packet):
     """
     Extract useful information from a packet.
@@ -34,6 +107,7 @@ def parse_packet(packet):
         "destination_port": None,
         "packet_size": len(packet),
         "flags": None,
+        "info": None
     }
 
     # ---------------------------------------
@@ -92,11 +166,14 @@ def parse_packet(packet):
         icmp = packet[ICMP]
 
         packet_info["protocol"] = "ICMP"
-        packet_info["type"] = icmp.type
-        packet_info["code"] = icmp.code
+        packet_info["source_port"] = None
+        packet_info["destination_port"] = None
 
     else:
 
         packet_info["protocol"] = "OTHER"
+
+    # Generate Wireshark-style Info summary
+    packet_info["info"] = generate_info(packet)
 
     return packet_info

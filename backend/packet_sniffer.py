@@ -24,6 +24,9 @@ def start_sniffer(analyzer):
 
         try:
 
+            if getattr(analyzer, "paused", False):
+                return
+
             # Save raw packet directly to PCAP
             writer.write(packet)
 
@@ -32,7 +35,7 @@ def start_sniffer(analyzer):
 
             if packet_info:
 
-                analyzer.update_statistics(packet_info)
+                analyzer.update_statistics(packet_info, packet)
 
         except Exception as e:
 
@@ -50,15 +53,24 @@ def start_sniffer(analyzer):
 
         sniff(
             prn=process_packet,
-            store=False
+            store=False,
+            stop_filter=lambda pkt: not analyzer.running
         )
 
-    except KeyboardInterrupt:
+    except PermissionError:
 
-        print("\nStopping Packet Capture...")
+        print("\n" + "=" * 60)
+        print("[Sniffer Warning] Raw socket capture permissions (NET_RAW) are missing.")
+        print("This is expected on cloud hosting environments (Render/Heroku/Vercel).")
+        print("The backend will run in API/Demo Mode using existing database records.")
+        print("=" * 60)
+
+    except Exception as e:
+
+        print(f"\n[Sniffer Warning] Could not start packet capture: {e}")
 
     finally:
 
         writer.close()
 
-        print("PCAP File Saved Successfully.")
+        print("PCAP File Saved Successfully.")
