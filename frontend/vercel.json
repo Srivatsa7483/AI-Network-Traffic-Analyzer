@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://network-analyzer-api.onrender.com/api/:path*"
+      "destination": "https://network-analyzer-api-vprh.onrender.com/:path*"
     }
   ]
 }
