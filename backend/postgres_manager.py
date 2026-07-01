@@ -110,6 +110,45 @@ class PostgreSQLManager:
                 )
                 """)
 
+                # Create AI Trends Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_trends (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER,
+                    timestamp VARCHAR(50),
+                    prediction VARCHAR(20),
+                    score REAL,
+                    threat_score REAL,
+                    risk_level VARCHAR(20),
+                    confidence REAL,
+                    reasons TEXT
+                )
+                """)
+
+                # Create Audit Logs Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id SERIAL PRIMARY KEY,
+                    timestamp VARCHAR(50),
+                    username VARCHAR(80),
+                    action TEXT,
+                    details TEXT,
+                    ip_address VARCHAR(50)
+                )
+                """)
+
+                # Create API Keys Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id SERIAL PRIMARY KEY,
+                    key_value VARCHAR(255) UNIQUE NOT NULL,
+                    name VARCHAR(100) NOT NULL,
+                    role VARCHAR(20) DEFAULT 'Analyst',
+                    created_at VARCHAR(50),
+                    expires_at VARCHAR(50)
+                )
+                """)
+
     def create_session(self, start_time):
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -393,3 +432,145 @@ class PostgreSQLManager:
                     return True
         except psycopg2.IntegrityError as e:
             raise ValueError("Username or email already exists")
+
+    def insert_ai_trend(self, session_id, trend):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                INSERT INTO ai_trends (
+                    session_id, timestamp, prediction, score, threat_score, risk_level, confidence, reasons
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    session_id,
+                    trend["timestamp"],
+                    trend["prediction"],
+                    trend["score"],
+                    trend["threat_score"],
+                    trend["risk_level"],
+                    trend["confidence"],
+                    ", ".join(trend["reasons"])
+                ))
+
+    def get_ai_trends(self, limit=100):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                SELECT timestamp, prediction, score, threat_score, risk_level, confidence, reasons
+                FROM ai_trends
+                ORDER BY id DESC
+                LIMIT %s
+                """, (limit,))
+                rows = cursor.fetchall()
+                trends = []
+                for r in rows:
+                    trends.append({
+                        "timestamp": r[0],
+                        "prediction": r[1],
+                        "score": r[2],
+                        "threat_score": r[3],
+                        "risk_level": r[4],
+                        "confidence": r[5],
+                        "reasons": r[6].split(", ") if r[6] else []
+                    })
+                return trends
+
+    def get_session_by_id(self, session_id):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM sessions WHERE id = %s", (session_id,))
+                return cursor.fetchone()
+
+    def insert_audit_log(self, username, action, details, ip_address):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                INSERT INTO audit_logs (timestamp, username, action, details, ip_address)
+                VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    username,
+                    action,
+                    details,
+                    ip_address
+                ))
+
+    def get_audit_logs(self, limit=100):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                SELECT timestamp, username, action, details, ip_address
+                FROM audit_logs
+                ORDER BY id DESC
+                LIMIT %s
+                """, (limit,))
+                rows = cursor.fetchall()
+                logs = []
+                for r in rows:
+                    logs.append({
+                        "timestamp": r[0],
+                        "username": r[1],
+                        "action": r[2],
+                        "details": r[3],
+                        "ip_address": r[4]
+                    })
+                return logs
+
+    def create_api_key(self, key_value, name, role, expires_at=None):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    cursor.execute("""
+                    INSERT INTO api_keys (key_value, name, role, created_at, expires_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """, (
+                        key_value,
+                        name,
+                        role,
+                        time.strftime("%Y-%m-%d %H:%M:%S"),
+                        expires_at
+                    ))
+                    return True
+                except Exception as e:
+                    print(f"[Database Error] Creating PostgreSQL API key failed: {e}")
+                    return False
+
+    def get_api_key_by_value(self, key_value):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id, name, role, expires_at FROM api_keys WHERE key_value = %s", (key_value,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "id": row[0],
+                        "name": row[1],
+                        "role": row[2],
+                        "expires_at": row[3]
+                    }
+                return None
+
+    def get_api_keys(self):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id, name, role, created_at, expires_at, key_value FROM api_keys ORDER BY id DESC")
+                rows = cursor.fetchall()
+                keys = []
+                for r in rows:
+                    keys.append({
+                        "id": r[0],
+                        "name": r[1],
+                        "role": r[2],
+                        "created_at": r[3],
+                        "expires_at": r[4],
+                        "key_value": r[5]
+                    })
+                return keys
+
+    def revoke_api_key(self, key_id):
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    cursor.execute("DELETE FROM api_keys WHERE id = %s", (key_id,))
+                    return True
+                except Exception as e:
+                    print(f"[Database Error] Revoking PostgreSQL API key #{key_id} failed: {e}")
+                    return False

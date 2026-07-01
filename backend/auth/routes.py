@@ -23,6 +23,10 @@ def register():
     
     try:
         user_id = db.create_user(username, email, p_hash, role)
+        try:
+            db.insert_audit_log(username, "USER_REGISTER", f"Operator account registered with role: {role}.", request.remote_addr)
+        except Exception as audit_err:
+            print(f"[Audit Log Warning] {audit_err}")
         return jsonify({
             'message': 'User registered successfully',
             'user_id': user_id
@@ -53,7 +57,12 @@ def login():
             return jsonify({'message': 'Invalid username or password'}), 401
             
         # Generate token
-        token = generate_token(user_id, role)
+        token = generate_token(user_id, role, uname)
+        
+        try:
+            db.insert_audit_log(uname, "USER_LOGIN", "Operator logged in successfully.", request.remote_addr)
+        except Exception as audit_err:
+            print(f"[Audit Log Warning] {audit_err}")
         
         return jsonify({
             'message': 'Login successful',

@@ -48,6 +48,30 @@ function PacketDetailsDrawer({ packetId, isOpen, onClose }) {
         }));
     };
 
+    const getLayerTitle = (layerName, fields) => {
+        if (!fields) return layerName;
+        switch (layerName) {
+            case "Ether":
+                return `Ethernet II, Src: ${fields.src || "unknown"}, Dst: ${fields.dst || "unknown"}`;
+            case "IP":
+                return `Internet Protocol Version 4, Src: ${fields.src || "unknown"}, Dst: ${fields.dst || "unknown"}`;
+            case "IPv6":
+                return `Internet Protocol Version 6, Src: ${fields.src || "unknown"}, Dst: ${fields.dst || "unknown"}`;
+            case "TCP":
+                return `Transmission Control Protocol, Src Port: ${fields.sport || "unknown"}, Dst Port: ${fields.dport || "unknown"}`;
+            case "UDP":
+                return `User Datagram Protocol, Src Port: ${fields.sport || "unknown"}, Dst Port: ${fields.dport || "unknown"}`;
+            case "ICMP":
+                return `Internet Control Message Protocol, Type: ${fields.type || "0"}, Code: ${fields.code || "0"}`;
+            case "DNS":
+                return `Domain Name System (${fields.qr === "1" || fields.qr === "True" ? "Response" : "Query"})`;
+            case "Raw":
+                return `Data Payload (${fields.load ? fields.load.length + " bytes" : "raw bytes"})`;
+            default:
+                return `${layerName} Layer`;
+        }
+    };
+
     return (
         <div className={`fixed inset-y-0 right-0 w-full md:w-[480px] lg:w-[580px] bg-[#0b0f19] border-l border-[#1e293b] shadow-2xl z-50 flex flex-col transition duration-300 ${
             isOpen ? "translate-x-0" : "translate-x-full"
@@ -118,10 +142,10 @@ function PacketDetailsDrawer({ packetId, isOpen, onClose }) {
                                         {/* Toggle Header */}
                                         <button
                                             onClick={() => toggleLayer(layerName)}
-                                            className="w-full px-4 py-3 bg-[#161f30]/40 flex items-center justify-between text-xs font-bold text-white tracking-wider border-b border-[#1e293b]/20 hover:bg-[#161f30]/80 transition"
+                                            className="w-full px-4 py-3 bg-[#161f30]/40 flex items-center justify-between text-xs font-bold text-white tracking-wider border-b border-[#1e293b]/20 hover:bg-[#161f30]/80 transition text-left"
                                         >
-                                            <span className="font-mono">{layerName} Layer</span>
-                                            {isLayerOpen ? <FaChevronDown className="text-slate-400 text-[10px]" /> : <FaChevronRight className="text-slate-400 text-[10px]" />}
+                                            <span className="font-mono">{getLayerTitle(layerName, fields)}</span>
+                                            {isLayerOpen ? <FaChevronDown className="text-slate-400 text-[10px] flex-shrink-0 ml-2" /> : <FaChevronRight className="text-slate-400 text-[10px] flex-shrink-0 ml-2" />}
                                         </button>
 
                                         {/* Fields List */}

@@ -119,6 +119,45 @@ class SQLiteManager:
                 )
                 """)
 
+                # AI Trends/History Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ai_trends (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    timestamp TEXT,
+                    prediction TEXT,
+                    score REAL,
+                    threat_score REAL,
+                    risk_level TEXT,
+                    confidence REAL,
+                    reasons TEXT
+                )
+                """)
+
+                # Audit Logs Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    username TEXT,
+                    action TEXT,
+                    details TEXT,
+                    ip_address TEXT
+                )
+                """)
+
+                # API Keys Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    key_value TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    role TEXT DEFAULT 'Analyst',
+                    created_at TEXT,
+                    expires_at TEXT
+                )
+                """)
+
                 self.connection.commit()
 
             finally:
@@ -372,7 +411,14 @@ class SQLiteManager:
 
                 cursor.close()
 
-    # ----------------------------------------------------
+    def get_session_by_id(self, session_id):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+                return cursor.fetchone()
+            finally:
+                cursor.close()
 
     def close(self):
 
@@ -738,6 +784,176 @@ class SQLiteManager:
                 return True
             except sqlite3.IntegrityError:
                 raise ValueError("Username or email already exists")
+            finally:
+                cursor.close()
+
+    def insert_ai_trend(self, session_id, trend):
+        with self.lock:
+            if self.closed:
+                return
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                INSERT INTO ai_trends (
+                    session_id, timestamp, prediction, score, threat_score, risk_level, confidence, reasons
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    session_id,
+                    trend["timestamp"],
+                    trend["prediction"],
+                    trend["score"],
+                    trend["threat_score"],
+                    trend["risk_level"],
+                    trend["confidence"],
+                    ", ".join(trend["reasons"])
+                ))
+                self.connection.commit()
+            finally:
+                cursor.close()
+
+    def get_ai_trends(self, limit=100):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                SELECT timestamp, prediction, score, threat_score, risk_level, confidence, reasons
+                FROM ai_trends
+                ORDER BY id DESC
+                LIMIT ?
+                """, (limit,))
+                rows = cursor.fetchall()
+                trends = []
+                for r in rows:
+                    trends.append({
+                        "timestamp": r[0],
+                        "prediction": r[1],
+                        "score": r[2],
+                        "threat_score": r[3],
+                        "risk_level": r[4],
+                        "confidence": r[5],
+                        "reasons": r[6].split(", ") if r[6] else []
+                    })
+                return trends
+            finally:
+                cursor.close()
+
+    def insert_audit_log(self, username, action, details, ip_address):
+        with self.lock:
+            if self.closed:
+                return
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                INSERT INTO audit_logs (timestamp, username, action, details, ip_address)
+                VALUES (?, ?, ?, ?, ?)
+                """, (
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    username,
+                    action,
+                    details,
+                    ip_address
+                ))
+                self.connection.commit()
+            finally:
+                cursor.close()
+
+    def get_audit_logs(self, limit=100):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                SELECT timestamp, username, action, details, ip_address
+                FROM audit_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """, (limit,))
+                rows = cursor.fetchall()
+                logs = []
+                for r in rows:
+                    logs.append({
+                        "timestamp": r[0],
+                        "username": r[1],
+                        "action": r[2],
+                        "details": r[3],
+                        "ip_address": r[4]
+                    })
+                return logs
+            finally:
+                cursor.close()
+
+    def create_api_key(self, key_value, name, role, expires_at=None):
+        with self.lock:
+            if self.closed:
+                return False
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("""
+                INSERT INTO api_keys (key_value, name, role, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                """, (
+                    key_value,
+                    name,
+                    role,
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    expires_at
+                ))
+                self.connection.commit()
+                return True
+            except Exception as e:
+                print(f"[Database Error] Creating API key failed: {e}")
+                return False
+            finally:
+                cursor.close()
+
+    def get_api_key_by_value(self, key_value):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("SELECT id, name, role, expires_at FROM api_keys WHERE key_value = ?", (key_value,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "id": row[0],
+                        "name": row[1],
+                        "role": row[2],
+                        "expires_at": row[3]
+                    }
+                return None
+            finally:
+                cursor.close()
+
+    def get_api_keys(self):
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("SELECT id, name, role, created_at, expires_at, key_value FROM api_keys ORDER BY id DESC")
+                rows = cursor.fetchall()
+                keys = []
+                for r in rows:
+                    keys.append({
+                        "id": r[0],
+                        "name": r[1],
+                        "role": r[2],
+                        "created_at": r[3],
+                        "expires_at": r[4],
+                        "key_value": r[5]
+                    })
+                return keys
+            finally:
+                cursor.close()
+
+    def revoke_api_key(self, key_id):
+        with self.lock:
+            if self.closed:
+                return False
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+                self.connection.commit()
+                return True
+            except Exception as e:
+                print(f"[Database Error] Revoking API key #{key_id} failed: {e}")
+                return False
             finally:
                 cursor.close()
 

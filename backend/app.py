@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from threading import Thread
 
@@ -19,7 +19,9 @@ app = Flask(__name__)
 CORS(app, origins=[
     "http://localhost",
     "http://localhost:80",
+    "http://localhost:5173",
     "http://127.0.0.1",
+    "http://127.0.0.1:5173",
     "http://network-analyzer-web",
 ])
 
@@ -102,37 +104,64 @@ def ports():
 @app.route("/recent-packets")
 @token_required(allowed_roles=['Admin', 'Analyst'])
 def recent_packets():
+    from packet_filter import filter_packets
+    query = request.args.get("filter", "")
+    packets = analyzer.get_recent_packets()
+    if query:
+        packets = filter_packets(packets, query)
+    return jsonify(packets)
 
-    return jsonify(
-        analyzer.get_recent_packets()
-    )
+@app.route("/geoip/locations")
+@token_required(allowed_roles=['Admin', 'Analyst'])
+def geoip_locations():
+    from geoip_lookup import lookup_ip
+    packets = analyzer.get_recent_packets()
+    unique_ips = set()
+    for p in packets:
+        src = p.get("source_ip")
+        dst = p.get("destination_ip")
+        if src:
+            unique_ips.add(src)
+        if dst:
+            unique_ips.add(dst)
+    
+    locations = {}
+    for ip in unique_ips:
+        try:
+            loc = lookup_ip(ip)
+            if loc and not loc.get("private"):
+                locations[ip] = loc
+        except Exception as lookup_err:
+            print(f"[GeoIP Lookup Warning] Error resolving IP {ip}: {lookup_err}")
+            
+    return jsonify(locations)
 
 @app.route("/export/csv")
 @token_required(allowed_roles=['Admin', 'Analyst'])
 def export_csv():
-
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "EXPORT_CSV", "Operator exported session packet log as CSV.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     filename = analyzer.export_current_session()
-
     return send_file(
-
         filename,
-
         as_attachment=True
-
     )
 
 @app.route("/export/pcap")
 @token_required(allowed_roles=['Admin', 'Analyst'])
 def export_pcap():
-
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "EXPORT_PCAP", "Operator exported session packet log as PCAP.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     filename = analyzer.export_current_pcap()
-
     return send_file(
-
         filename,
-
         as_attachment=True
-
     )
 
 @app.route("/alerts")
@@ -214,6 +243,99 @@ def sessions():
         patched.append(row)
     return jsonify(patched)
 
+@app.route("/sessions/<int:session_id>/packets")
+@token_required(allowed_roles=['Admin', 'Analyst'])
+def get_session_packets(session_id):
+    rows = analyzer.db.get_packets_by_session(session_id)
+    packets = []
+    for r in rows:
+        p = {
+            "id": r[0],
+            "session_id": r[1],
+            "timestamp": r[2],
+            "source_ip": r[3],
+            "destination_ip": r[4],
+            "protocol": r[5],
+            "source_port": r[6],
+            "destination_port": r[7],
+            "packet_size": r[8],
+            "ip_version": r[9],
+        }
+        if len(r) > 10:
+            p["flags"] = r[10]
+        else:
+            p["flags"] = None
+        if len(r) > 11:
+            p["info"] = r[11]
+        else:
+            p["info"] = f"{r[5]} Frame"
+        packets.append(p)
+    return jsonify(packets)
+
+@app.route("/sessions/<int:session_id>/report")
+@token_required(allowed_roles=['Admin', 'Analyst'])
+def get_session_report(session_id):
+    from flask import make_response
+    from report_generator import generate_html_report
+
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "REPORT_GENERATE", f"Operator generated HTML report for session #{session_id}.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
+
+    session = analyzer.db.get_session_by_id(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+        
+    packets = analyzer.db.get_packets_by_session(session_id)
+    alerts = analyzer.db.get_session_alerts(session_id)
+    
+    total_packets = len(packets)
+    total_bytes = sum(p[8] for p in packets) if packets else 0
+    avg_size = total_bytes / total_packets if total_packets > 0 else 0
+    
+    if session[4] == "Running" and session_id == analyzer.session_id:
+        packet_rate = analyzer.statistics["packet_rate"]
+    else:
+        packet_rate = 0
+        
+    metrics = {
+        "total_packets": total_packets,
+        "total_bytes": total_bytes,
+        "packet_rate": packet_rate,
+        "average_packet_size": avg_size
+    }
+    
+    # Compute protocol distribution
+    protocols = {}
+    for p in packets:
+        proto = p[5]
+        if proto:
+            protocols[proto] = protocols.get(proto, 0) + 1
+            
+    # Compute top talkers
+    ip_counts = {}
+    for p in packets:
+        src = p[3]
+        dst = p[4]
+        if src:
+            ip_counts[src] = ip_counts.get(src, 0) + 1
+        if dst:
+            ip_counts[dst] = ip_counts.get(dst, 0) + 1
+            
+    top_ips = dict(sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:8])
+    
+    html_content = generate_html_report(session, metrics, protocols, top_ips, alerts)
+    
+    if request.args.get("download") == "true":
+        response = make_response(html_content)
+        response.headers["Content-Disposition"] = f"attachment; filename=session_{session_id}_report.html"
+        response.headers["Content-Type"] = "text/html"
+        return response
+        
+    return html_content
+
 @app.route("/ai/status")
 @token_required(allowed_roles=['Admin', 'Analyst'])
 def ai_status():
@@ -243,12 +365,17 @@ def ai_info():
 @app.route("/ai/history")
 @token_required(allowed_roles=['Admin', 'Analyst'])
 def ai_history():
+    return jsonify(analyzer.ai_history)
 
-    return jsonify(
-
-        analyzer.ai_history
-
-    )
+@app.route("/ai/trends")
+@token_required(allowed_roles=['Admin', 'Analyst'])
+def ai_trends():
+    limit = request.args.get("limit", default=100, type=int)
+    try:
+        trends = analyzer.db.get_ai_trends(limit)
+        return jsonify(trends)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/ai/statistics")
 @token_required(allowed_roles=['Admin', 'Analyst'])
@@ -268,33 +395,58 @@ def ai_statistics():
 
     })
 
+# Background ML model training states
+is_training = False
+training_status = "idle"
+training_error = None
+
+def run_training_in_background():
+    global is_training, training_status, training_error
+    is_training = True
+    training_status = "training"
+    training_error = None
+    try:
+        from ml.train_model import train as train_ml_model
+        train_ml_model()
+        training_status = "completed"
+    except Exception as e:
+        training_status = "error"
+        training_error = str(e)
+        print(f"[ML Training Error] Background training failed: {e}")
+    finally:
+        is_training = False
+
 @app.route("/ai/train", methods=["POST"])
 @token_required(allowed_roles=['Admin'])
 def ai_train():
+    global is_training, training_status, training_error
+    if is_training:
+        return jsonify({"status": "error", "message": "Model training is already in progress."}), 400
 
+    username = request.user.get('username', 'Unknown Operator')
     try:
-
-        from ml.train_model import train as train_ml_model
-
-        train_ml_model()
-
-        return jsonify({
-
-            "status": "success",
-
-            "message": "AI model trained successfully."
-
-        })
-
+        analyzer.db.insert_audit_log(username, "MODEL_RETRAIN", "Operator initiated ML model retraining sequence.", request.remote_addr)
     except Exception as e:
+        print(f"[Audit Log Warning] {e}")
 
-        return jsonify({
+    # Spawn asynchronous worker thread
+    worker = Thread(target=run_training_in_background, daemon=True)
+    worker.start()
 
-            "status": "error",
+    return jsonify({
+        "status": "success",
+        "message": "AI model training started in background worker thread."
+    })
 
-            "message": str(e)
-
-        }), 500
+@app.route("/ai/train/status")
+@token_required(allowed_roles=['Admin', 'Analyst'])
+def get_ai_train_status():
+    global is_training, training_status, training_error
+    return jsonify({
+        "is_training": is_training,
+        "status": training_status,
+        "error": training_error
+    })
 
 @app.route("/packets/<int:packet_id>/detail")
 @token_required(allowed_roles=['Admin', 'Analyst'])
@@ -361,24 +513,29 @@ def packet_detail(packet_id):
 @app.route("/sessions/<int:session_id>", methods=["DELETE"])
 @token_required(allowed_roles=['Admin'])
 def delete_session(session_id):
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "SESSION_DELETE", f"Operator purged capture session #{session_id}.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
 
     if session_id == analyzer.session_id:
-
         return jsonify({"status": "error", "message": "Cannot delete active capture session."}), 400
 
     success = analyzer.db.delete_session(session_id)
-
     if success:
-
         return jsonify({"status": "success", "message": f"Session #{session_id} successfully deleted."})
-
     else:
-
         return jsonify({"status": "error", "message": "Failed to delete session database files."}), 500
 
 @app.route("/capture/start", methods=["POST"])
 @token_required(allowed_roles=['Admin'])
 def capture_start():
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "CAPTURE_START", "Operator initiated sniffer interface active listener.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     if not analyzer.running:
         analyzer.running = True
         sniffer_thread = Thread(
@@ -393,18 +550,33 @@ def capture_start():
 @app.route("/capture/pause", methods=["POST"])
 @token_required(allowed_roles=['Admin'])
 def capture_pause():
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "CAPTURE_PAUSE", "Operator paused sniffer interface active listener.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     analyzer.paused = True
     return jsonify({"status": "success", "message": "Capture paused."})
 
 @app.route("/capture/stop", methods=["POST"])
 @token_required(allowed_roles=['Admin'])
 def capture_stop():
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "CAPTURE_STOP", "Operator terminated sniffer interface listener.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     analyzer.running = False
     return jsonify({"status": "success", "message": "Capture stopped."})
 
 @app.route("/capture/clear", methods=["POST"])
 @token_required(allowed_roles=['Admin'])
 def capture_clear():
+    username = request.user.get('username', 'Unknown Operator')
+    try:
+        analyzer.db.insert_audit_log(username, "CAPTURE_CLEAR", "Operator cleared active packet buffer.", request.remote_addr)
+    except Exception as e:
+        print(f"[Audit Log Warning] {e}")
     analyzer.recent_packets.clear()
     analyzer.statistics["total_packets"] = 0
     analyzer.statistics["total_bytes"] = 0
@@ -454,9 +626,71 @@ print("Packet Sniffer Running...")
 print("Flask API Running on 0.0.0.0:5000")
 print("=" * 60)
 
-# ------------------------------------
-# Main (direct python app.py only)
-# ------------------------------------
+@app.route("/audit-logs")
+@token_required(allowed_roles=['Admin'])
+def get_audit_logs():
+    limit = request.args.get("limit", default=100, type=int)
+    try:
+        logs = analyzer.db.get_audit_logs(limit)
+        return jsonify(logs)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api-keys")
+@token_required(allowed_roles=['Admin'])
+def get_api_keys_route():
+    try:
+        keys = analyzer.db.get_api_keys()
+        return jsonify(keys)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api-keys", methods=["POST"])
+@token_required(allowed_roles=['Admin'])
+def create_api_key_route():
+    import secrets
+    data = request.get_json() or {}
+    name = data.get("name")
+    role = data.get("role", "Analyst")
+    if not name:
+        return jsonify({"error": "Key name is required"}), 400
+        
+    if role not in ["Admin", "Analyst", "Guest"]:
+        return jsonify({"error": "Invalid role specified"}), 400
+        
+    key_value = f"soc_live_{secrets.token_hex(24)}"
+    
+    success = analyzer.db.create_api_key(key_value, name, role)
+    if success:
+        username = request.user.get("username", "Unknown Operator")
+        try:
+            analyzer.db.insert_audit_log(username, "APIKEY_CREATE", f"Operator generated new API key ({name}) with role {role}.", request.remote_addr)
+        except Exception:
+            pass
+        return jsonify({
+            "status": "success",
+            "key": {
+                "key_value": key_value,
+                "name": name,
+                "role": role
+            }
+        }), 201
+    else:
+        return jsonify({"error": "Failed to store API Key"}), 500
+
+@app.route("/api-keys/<int:key_id>", methods=["DELETE"])
+@token_required(allowed_roles=['Admin'])
+def revoke_api_key_route(key_id):
+    success = analyzer.db.revoke_api_key(key_id)
+    if success:
+        username = request.user.get("username", "Unknown Operator")
+        try:
+            analyzer.db.insert_audit_log(username, "APIKEY_REVOKE", f"Operator revoked API key ID #{key_id}.", request.remote_addr)
+        except Exception:
+            pass
+        return jsonify({"status": "success", "message": f"API key #{key_id} successfully revoked."})
+    else:
+        return jsonify({"error": "Failed to revoke API key"}), 500
 
 if __name__ == "__main__":
     try:

@@ -53,7 +53,7 @@ function Dashboard() {
     }, []);
 
     const panelStyle = {
-        background: "rgba(11, 15, 26, 0.75)",
+        background: "rgba(11, 15, 26, 0.88)",
         border: "1px solid rgba(30, 41, 59, 0.7)",
         backdropFilter: "blur(16px)",
         boxShadow: "0 4px 24px rgba(0,0,0,0.4)",

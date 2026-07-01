@@ -12,6 +12,10 @@ from packet_parser import parse_packet
 
 
 def start_sniffer(analyzer):
+    import queue
+    from threading import Thread
+
+    packet_queue = queue.Queue(maxsize=10000)
 
     # Create PCAP writer for current session
     writer = PcapWriter(
@@ -20,25 +24,48 @@ def start_sniffer(analyzer):
         sync=True
     )
 
+    def packet_consumer():
+        while analyzer.running:
+            try:
+                # Fetch packet with timeout to check running status regularly
+                packet = packet_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            try:
+                if getattr(analyzer, "paused", False):
+                    packet_queue.task_done()
+                    continue
+
+                # Save raw packet directly to PCAP
+                writer.write(packet)
+
+                # Parse packet
+                packet_info = parse_packet(packet)
+                if packet_info:
+                    analyzer.update_statistics(packet_info, packet)
+            except Exception as e:
+                print(f"[Consumer Error] {e}")
+            finally:
+                packet_queue.task_done()
+
+        writer.close()
+        print("PCAP File Saved Successfully.")
+
+    # Launch background consumer worker
+    consumer_thread = Thread(target=packet_consumer, daemon=True)
+    consumer_thread.start()
+
     def process_packet(packet):
-
         try:
-
             if getattr(analyzer, "paused", False):
                 return
-
-            # Save raw packet directly to PCAP
-            writer.write(packet)
-
-            # Parse packet
-            packet_info = parse_packet(packet)
-
-            if packet_info:
-
-                analyzer.update_statistics(packet_info, packet)
-
+            # Non-blocking enqueue to keep sniff callback fast
+            packet_queue.put_nowait(packet)
+        except queue.Full:
+            # Prevent memory overflow under flood attacks by warning and skipping
+            pass
         except Exception as e:
-
             print(f"[Packet Error] {e}")
 
     print("=" * 60)
@@ -50,27 +77,16 @@ def start_sniffer(analyzer):
     print("=" * 60)
 
     try:
-
         sniff(
             prn=process_packet,
             store=False,
             stop_filter=lambda pkt: not analyzer.running
         )
-
     except PermissionError:
-
         print("\n" + "=" * 60)
         print("[Sniffer Warning] Raw socket capture permissions (NET_RAW) are missing.")
         print("This is expected on cloud hosting environments (Render/Heroku/Vercel).")
         print("The backend will run in API/Demo Mode using existing database records.")
         print("=" * 60)
-
     except Exception as e:
-
-        print(f"\n[Sniffer Warning] Could not start packet capture: {e}")
-
-    finally:
-
-        writer.close()
-
-        print("PCAP File Saved Successfully.")
+        print(f"\n[Sniffer Warning] Could not start packet capture: {e}")

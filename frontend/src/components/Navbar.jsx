@@ -27,10 +27,38 @@ function Navbar() {
     const [packetCount, setPacketCount] = useState(0);
     const [tickerItems, setTickerItems] = useState([...TICKER_TEMPLATES, ...TICKER_TEMPLATES]);
     const prevPackets = useRef(0);
+    const prevAlerts = useRef(0);
     const [packetFlash, setPacketFlash] = useState(false);
     const [currentTheme, setCurrentTheme] = useState(
         localStorage.getItem("active_theme") || "cyberpunk"
     );
+
+    // Anomaly Toast states
+    const [toastActive, setToastActive] = useState(false);
+    const [latestAlert, setLatestAlert] = useState(null);
+
+    const playChime = () => {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const playBeep = (freq, duration, startTime) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.frequency.setValueAtTime(freq, startTime);
+                osc.type = "sine";
+                gain.gain.setValueAtTime(0.12, startTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+                osc.start(startTime);
+                osc.stop(startTime + duration);
+            };
+            const now = audioCtx.currentTime;
+            playBeep(587.33, 0.12, now); // D5 chord
+            playBeep(880.00, 0.25, now + 0.08); // A5 chord
+        } catch (e) {
+            console.error("Audio playback error:", e);
+        }
+    };
 
     // Sync theme if changed elsewhere (e.g. Settings page)
     useEffect(() => {
@@ -72,7 +100,38 @@ function Navbar() {
                 API.get("/security"),
                 API.get("/metrics"),
             ]);
-            if (alertsRes.data) setAlertCount(alertsRes.data.total_alerts || 0);
+            
+            if (alertsRes.data) {
+                const newAlerts = alertsRes.data.total_alerts || 0;
+                // If a new alert has triggered
+                if (newAlerts > prevAlerts.current) {
+                    if (prevAlerts.current > 0) {
+                        try {
+                            const alertsDetails = await API.get("/alerts");
+                            if (alertsDetails.data && alertsDetails.data.length > 0) {
+                                const latest = alertsDetails.data[0];
+                                setLatestAlert({
+                                    id: latest[0],
+                                    timestamp: latest[2],
+                                    severity: latest[3],
+                                    type: latest[4],
+                                    source: latest[5],
+                                    desc: latest[6]
+                                });
+                                setToastActive(true);
+                                playChime();
+                                // Hide after 6 seconds
+                                setTimeout(() => setToastActive(false), 6000);
+                            }
+                        } catch (err) {
+                            console.error("Toast Fetch Error:", err);
+                        }
+                    }
+                    prevAlerts.current = newAlerts;
+                }
+                setAlertCount(newAlerts);
+            }
+            
             if (metricsRes.data) {
                 const newCount = metricsRes.data.total_packets || 0;
                 if (newCount !== prevPackets.current) {
@@ -291,6 +350,42 @@ function Navbar() {
                     ))}
                 </div>
             </div>
+
+            {/* Custom Cyberpunk Anomaly Toast Banner */}
+            {toastActive && latestAlert && (
+                <div 
+                    className="fixed top-20 right-6 z-50 w-80 bg-[#160c14] border border-rose-500 rounded-xl p-4 shadow-[0_0_24px_rgba(244,63,94,0.4)] flex gap-3 select-none"
+                    style={{
+                        animation: "slideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1)"
+                    }}
+                >
+                    <div className="h-9 w-9 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-500 animate-pulse flex-shrink-0">
+                        🚨
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="flex justify-between items-center">
+                            <span className="text-[10px] text-rose-400 font-extrabold uppercase tracking-widest font-mono">
+                                Security Alert [{latestAlert.severity}]
+                            </span>
+                            <span className="text-[9px] text-slate-500 font-mono">
+                                {latestAlert.timestamp.split(" ")[1] || latestAlert.timestamp}
+                            </span>
+                        </div>
+                        <h4 className="text-white text-xs font-bold font-mono mt-1 uppercase truncate font-semibold">
+                            {latestAlert.type.replace("_", " ")}
+                        </h4>
+                        <p className="text-[10px] text-slate-300 mt-1 leading-relaxed font-mono">
+                            {latestAlert.desc}
+                        </p>
+                    </div>
+                    <style>{`
+                        @keyframes slideIn {
+                            from { transform: translateX(120%); opacity: 0; }
+                            to { transform: translateX(0); opacity: 1; }
+                        }
+                    `}</style>
+                </div>
+            )}
         </header>
     );
 }

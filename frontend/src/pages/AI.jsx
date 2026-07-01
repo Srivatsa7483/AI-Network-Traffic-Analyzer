@@ -15,7 +15,19 @@ function AI() {
         try {
             const historyRes = await API.get("/ai/history");
             const statsRes = await API.get("/ai/statistics");
-            if (historyRes.data) setHistory(historyRes.data);
+            if (historyRes.data && Array.isArray(historyRes.data)) {
+                const mapped = historyRes.data.map(item => {
+                    const tScore = item.threat_score !== undefined 
+                        ? item.threat_score 
+                        : (item.score !== undefined ? Math.round(Math.max(0, (0.1 - item.score) * 200)) : 0);
+                    return {
+                        ...item,
+                        threat_score: tScore,
+                        score: typeof item.score === 'number' ? item.score : 0
+                    };
+                });
+                setHistory(mapped);
+            }
             if (statsRes.data) setStats(statsRes.data);
         } catch (error) {
             console.error("AI Page Fetch Error:", error);
@@ -24,19 +36,44 @@ function AI() {
 
     const handleRetrain = async () => {
         setIsTraining(true);
-        setTrainingMsg({ type: "info", text: "Training Isolation Forest model on SQLite packet archives..." });
+        setTrainingMsg({ type: "info", text: "Training Isolation Forest model on database packet archives..." });
         try {
             const res = await API.post("/ai/train");
             if (res.data && res.data.status === "success") {
-                setTrainingMsg({ type: "success", text: "Model trained successfully! Isolation Forest reloaded." });
-                loadAIData();
+                // Poll for background status
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const statusRes = await API.get("/ai/train/status");
+                        if (statusRes.data) {
+                            const { is_training, status, error } = statusRes.data;
+                            if (!is_training) {
+                                clearInterval(pollInterval);
+                                setIsTraining(false);
+                                if (status === "completed") {
+                                    setTrainingMsg({ type: "success", text: "Model trained successfully! Isolation Forest reloaded." });
+                                    loadAIData();
+                                } else if (status === "error") {
+                                    setTrainingMsg({ type: "error", text: `Training Failed: ${error || "Verify you have collected at least 1,000 packets in the database."}` });
+                                } else {
+                                    setTrainingMsg(null);
+                                }
+                            } else {
+                                setTrainingMsg({ type: "info", text: "Training Isolation Forest model in background (compiling packets)..." });
+                            }
+                        }
+                    } catch (pollErr) {
+                        clearInterval(pollInterval);
+                        setIsTraining(false);
+                        setTrainingMsg({ type: "error", text: "Lost connection to training worker." });
+                    }
+                }, 1500);
             } else {
                 setTrainingMsg({ type: "error", text: res.data.message || "Failed to retrain model." });
+                setIsTraining(false);
             }
         } catch (error) {
             const errDetail = error.response?.data?.message || "Verify you have collected at least 1,000 packets in the database.";
             setTrainingMsg({ type: "error", text: `Training Failed: ${errDetail}` });
-        } finally {
             setIsTraining(false);
         }
     };
@@ -133,14 +170,14 @@ function AI() {
                 {/* Right Side: Anomaly Score Timeline */}
                 <div className="lg:col-span-2 bg-[#111726] border border-[#1e293b] rounded-xl p-5 shadow-lg flex flex-col justify-between">
                     <div>
-                        <h2 className="text-sm font-bold text-white mb-1 uppercase tracking-wider">Anomaly Score Timeline</h2>
-                        <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-6">Unsupervised Anomaly Scores over Time</p>
+                        <h2 className="text-sm font-bold text-white mb-1 uppercase tracking-wider">Threat Score Timeline (%)</h2>
+                        <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold mb-6">Unsupervised Threat scores over time (0-100%)</p>
                     </div>
 
                     <div className="h-72">
                         {history.length === 0 ? (
-                            <div className="h-full flex items-center justify-center text-xs text-slate-500">
-                                No anomaly events recorded yet. Anomalous scores appear here.
+                            <div className="h-full flex items-center justify-center text-xs text-slate-500 font-mono">
+                                No threat score points recorded yet. Active captures populate this timeline.
                             </div>
                         ) : (
                             <ResponsiveContainer width="100%" height="100%">
@@ -153,15 +190,16 @@ function AI() {
                                     </defs>
                                     <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" vertical={false} />
                                     <XAxis dataKey="timestamp" stroke="#475569" tick={{ fontSize: 9, fontFamily: "monospace" }} />
-                                    <YAxis stroke="#475569" tick={{ fontSize: 9, fontFamily: "monospace" }} />
+                                    <YAxis stroke="#475569" domain={[0, 100]} tick={{ fontSize: 9, fontFamily: "monospace" }} />
                                     <Tooltip 
                                         content={({ active, payload, label }) => {
                                             if (active && payload && payload.length) {
+                                                const val = payload[0].value;
                                                 return (
                                                     <div className="bg-[#0b0f19] border border-[#1e293b] p-3 rounded-lg shadow-xl text-xs">
                                                         <p className="text-slate-500 font-semibold mb-1 font-mono">{label}</p>
                                                         <p className="text-rose-400 font-bold font-mono">
-                                                            Score: {payload[0].value.toFixed(4)}
+                                                            Threat Score: {typeof val === 'number' ? val.toFixed(1) : val}%
                                                         </p>
                                                     </div>
                                                 );
@@ -171,7 +209,7 @@ function AI() {
                                     />
                                     <Area 
                                         type="monotone" 
-                                        dataKey="score" 
+                                        dataKey="threat_score" 
                                         stroke="#ef4444" 
                                         strokeWidth={2} 
                                         fillOpacity={1} 

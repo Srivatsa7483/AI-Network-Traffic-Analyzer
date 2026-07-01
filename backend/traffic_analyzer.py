@@ -224,60 +224,85 @@ class TrafficAnalyzer:
                     self.ml_packets
                 )
 
-                if result and result["prediction"] == "ANOMALY":
-
-                    top_source = Counter(
-                        p["source_ip"] for p in self.ml_packets
-                    ).most_common(1)
-
-                    source_ip = (
-                        top_source[0][0]
-                        if top_source
-                        else "Unknown"
-                    )
-
-                    alert = {
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "severity": "MEDIUM",
-                        "type": "AI_ANOMALY",
-                        "source_ip": source_ip,
-                        "description": f"Isolation Forest detected unusual traffic (score={result['score']:.4f})"
+                if result:
+                    timestamp_now = time.strftime("%H:%M:%S")
+                    
+                    # Log trend details for both normal and anomaly
+                    trend_entry = {
+                        "timestamp": timestamp_now,
+                        "prediction": result["prediction"],
+                        "score": result["score"],
+                        "threat_score": result["threat_score"],
+                        "risk_level": result["risk_level"],
+                        "confidence": result["confidence"],
+                        "reasons": result["reasons"]
                     }
-
-                    # Save in memory
-                    self.detector.alerts.append(alert)
-
-                    # Save in database
-                    self.db.insert_alert(
-                        self.session_id,
-                        alert
-                    )
-
-                    # Increment in-memory alert counter
-                    self._total_alerts_count += 1
-
-                    # Save AI history
-                    self.ai_history.append({
-                        "timestamp": alert["timestamp"],
-                        "score": result["score"]
-                    })
+                    
+                    self.ai_history.append(trend_entry)
+                    if len(self.ai_history) > 200:
+                        self.ai_history.pop(0)
 
                     try:
-                        print("\n")
-                        print("=" * 70)
-                        print("🤖 AI ANOMALY DETECTED")
-                        print("=" * 70)
-                        print(f"Score       : {result['score']:.4f}")
-                        print(f"Description : {alert['description']}")
-                        print("=" * 70)
-                    except UnicodeEncodeError:
-                        print("\n")
-                        print("=" * 70)
-                        print("[AI ANOMALY] DETECTED")
-                        print("=" * 70)
-                        print(f"Score       : {result['score']:.4f}")
-                        print(f"Description : {alert['description']}")
-                        print("=" * 70)
+                        self.db.insert_ai_trend(self.session_id, trend_entry)
+                    except Exception as db_err:
+                        print(f"[Database Warning] Could not insert AI trend: {db_err}")
+
+                    # If an anomaly is identified, generate alert
+                    if result["prediction"] == "ANOMALY":
+                        top_source = Counter(
+                            p["source_ip"] for p in self.ml_packets
+                        ).most_common(1)
+
+                        source_ip = (
+                            top_source[0][0]
+                            if top_source
+                            else "Unknown"
+                        )
+
+                        alert_desc = f"AI Anomaly Alert: {', '.join(result['reasons'])} (Threat Score: {result['threat_score']}%)"
+                        severity_level = "CRITICAL" if result["risk_level"] == "Critical" else "HIGH" if result["risk_level"] == "High" else "MEDIUM"
+
+                        alert = {
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "severity": severity_level,
+                            "type": "AI_ANOMALY",
+                            "source_ip": source_ip,
+                            "description": alert_desc
+                        }
+
+                        # Save in memory
+                        self.detector.alerts.append(alert)
+
+                        # Save in database
+                        try:
+                            self.db.insert_alert(
+                                self.session_id,
+                                alert
+                            )
+                        except Exception as db_err:
+                            print(f"[Database Warning] Could not insert AI anomaly alert: {db_err}")
+
+                        # Increment in-memory alert counter
+                        self._total_alerts_count += 1
+
+                        try:
+                            print("\n")
+                            print("=" * 70)
+                            print("🤖 AI ANOMALY DETECTED")
+                            print("=" * 70)
+                            print(f"Threat Score: {result['threat_score']}% ({result['risk_level']} Risk)")
+                            print(f"Confidence  : {result['confidence']}%")
+                            print(f"Reasons     : {', '.join(result['reasons'])}")
+                            print("=" * 70)
+                        except UnicodeEncodeError:
+                            print("\n")
+                            print("=" * 70)
+                            print("[AI ANOMALY] DETECTED")
+                            print("=" * 70)
+                            print(f"Threat Score: {result['threat_score']}% ({result['risk_level']} Risk)")
+                            print(f"Confidence  : {result['confidence']}%")
+                            print(f"Reasons     : {', '.join(result['reasons'])}")
+                            print("=" * 70)
 
                 # Reset the window
                 self.ml_packets.clear()

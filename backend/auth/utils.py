@@ -13,13 +13,14 @@ def check_password(p_hash, password):
     return check_password_hash(p_hash, password)
 
 # Generate JWT Token (valid for 24 hours)
-def generate_token(user_id, role):
+def generate_token(user_id, role, username=""):
     try:
         payload = {
             'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1),
             'iat': datetime.datetime.utcnow(),
             'sub': str(user_id),
-            'role': role
+            'role': role,
+            'username': username
         }
         return jwt.encode(
             payload,
@@ -35,7 +36,8 @@ def decode_token(token):
         payload = jwt.decode(token, config.JWT_SECRET_KEY, algorithms=['HS256'])
         return {
             'user_id': int(payload['sub']),
-            'role': payload['role']
+            'role': payload['role'],
+            'username': payload.get('username', '')
         }
     except jwt.ExpiredSignatureError:
         return 'Signature expired. Please log in again.'
@@ -47,16 +49,36 @@ def token_required(allowed_roles=None):
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
+            # Check for API Key first
+            if 'X-API-Key' in request.headers:
+                api_key = request.headers['X-API-Key']
+                from database import DatabaseManager
+                db = DatabaseManager()
+                key_details = db.get_api_key_by_value(api_key)
+                if key_details:
+                    role = key_details['role']
+                    if allowed_roles and role not in allowed_roles:
+                        return jsonify({'message': f'Access denied: {role} role does not have permission'}), 403
+                    request.user = {
+                        'user_id': 0,
+                        'role': role,
+                        'username': f"API Key ({key_details['name']})"
+                    }
+                    return f(*args, **kwargs)
+                else:
+                    return jsonify({'message': 'Invalid API Key'}), 401
+
             token = None
-            
-            # Look for Authorization header
+            # Look for Authorization header or query param
             if 'Authorization' in request.headers:
                 auth_header = request.headers['Authorization']
                 if auth_header.startswith('Bearer '):
                     token = auth_header.split(" ")[1]
+            elif 'token' in request.args:
+                token = request.args.get('token')
             
             if not token:
-                return jsonify({'message': 'Access token is missing'}), 401
+                return jsonify({'message': 'Access token or API Key is missing'}), 401
             
             decoded = decode_token(token)
             

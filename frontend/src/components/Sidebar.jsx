@@ -9,7 +9,8 @@ import {
     FaCog,
     FaAngleLeft,
     FaAngleRight,
-    FaPlay
+    FaPlay,
+    FaProjectDiagram
 } from "react-icons/fa";
 
 // Hex/binary stream data for the sidebar animation
@@ -72,6 +73,7 @@ function Sidebar() {
         { path: "/",         name: "Dashboard",       icon: <FaThLarge />,   color: "#3b82f6" },
         { path: "/capture",  name: "Live Capture",    icon: <FaPlay />,      color: "#10b981" },
         { path: "/packets",  name: "Packet Explorer", icon: <FaListUl />,    color: "#06b6d4" },
+        { path: "/topology", name: "Network Map",     icon: <FaProjectDiagram />, color: "#38bdf8" },
         { path: "/alerts",   name: "Threat Center",   icon: <FaShieldAlt />, color: "#f43f5e" },
         { path: "/sessions", name: "Sessions",        icon: <FaDatabase />,  color: "#a78bfa" },
         { path: "/ai",       name: "AI Center",       icon: <FaRobot />,     color: "#f59e0b" },

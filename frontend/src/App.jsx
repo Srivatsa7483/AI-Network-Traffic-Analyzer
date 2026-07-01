@@ -20,6 +20,7 @@ import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
+import Topology from "./pages/Topology";
 
 function AppContent() {
     const { user } = useAuth();
@@ -52,7 +53,7 @@ function AppContent() {
     return (
         <div
             className="flex h-screen w-screen text-[#f0f4ff] overflow-hidden hex-grid-bg"
-            style={{ position: "relative", zIndex: 1, background: "rgba(5, 8, 16, 0.82)" }}
+            style={{ position: "relative", zIndex: 1, background: "transparent" }}
         >
             {/* Render 2D network canvas background only for logged in sessions */}
             <NetworkCanvas />
@@ -80,6 +81,11 @@ function AppContent() {
                         <Route path="/packets" element={
                             <ProtectedRoute allowedRoles={["Admin", "Analyst"]}>
                                 <Packets />
+                            </ProtectedRoute>
+                        } />
+                        <Route path="/topology" element={
+                            <ProtectedRoute allowedRoles={["Admin", "Analyst"]}>
+                                <Topology />
                             </ProtectedRoute>
                         } />
                         <Route path="/alerts" element={
