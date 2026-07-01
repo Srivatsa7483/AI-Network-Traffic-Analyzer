@@ -3,6 +3,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://network-analyzer-api-vprh.onrender.com/:path*"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
     }
   ]
 }
